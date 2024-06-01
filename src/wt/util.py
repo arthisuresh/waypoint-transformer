@@ -31,7 +31,7 @@ def configure_gpu(use_gpu: bool, which_gpu: int) -> torch.device:
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"  # see issue #152
         os.environ["CUDA_VISIBLE_DEVICES"] = str(which_gpu)
     else:
-        device = torch.device("cpu")
+        device = torch.device("mps")
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
     return device
