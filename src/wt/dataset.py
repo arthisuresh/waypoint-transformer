@@ -8,6 +8,7 @@ Sources:
 """
 
 from __future__ import annotations
+import sys
 
 from abc import ABC, abstractmethod
 import os
@@ -39,7 +40,8 @@ def create_data_module(
     average_reward_to_go: bool = True,
     seed: Optional[int] = None,
     K = 20,
-    train_goal_net = False
+    train_goal_net = False,
+    weight_loss_by_rtg = False
 ) -> AbstractDataModule:
     """Creates the data module used for training."""
     if unconditional_policy and reward_conditioning:
@@ -70,7 +72,8 @@ def create_data_module(
                 seed=seed,
                 train_goal_net = train_goal_net,
                 val_frac=val_frac,
-                K = K
+                K = K,
+                weight_loss_by_rtg = weight_loss_by_rtg
             )
     else:
         if unconditional_policy:
@@ -164,6 +167,7 @@ class D4RLIterableDataset(data.IterableDataset):
         goal_columns: Optional[Union[Tuple[int], List[int], np.ndarray]] = None,
         config: Optional[Dict] = None,
         augment: bool = True,
+        weight_loss_by_rtg: bool = False,
         **kwargs
     ):
         """Initializes the dataset.
@@ -191,6 +195,7 @@ class D4RLIterableDataset(data.IterableDataset):
         self.lengths = np.array([len(self.trajectories[i]['observations']) for i in range(len(trajectories))])
         self.rewards = np.array([sum(self.trajectories[i]['rewards']) for i in range(len(trajectories))])
         self.normalization_const = round(self.rewards.max(), -3)
+        self.weight_loss_by_rtg = weight_loss_by_rtg
         print("Normalization constant:", self.normalization_const)
 
 
@@ -209,7 +214,6 @@ class D4RLIterableDataset(data.IterableDataset):
         time_indices_2 = np.floor(
             proportional_indices_2 * lengths,
         ).astype(int)
-
         start_indices = np.minimum(
             time_indices_1,
             time_indices_2,
@@ -234,9 +238,8 @@ class D4RLIterableDataset(data.IterableDataset):
             a.append(traj['actions'][si:si + K].reshape(1, -1, act_dim))
             if self.config['goal_conditioned']:
                 g.append(np.hstack([traj['observations'][gi, self.goal_columns].reshape(1, -1, goal_dim)] * s[-1].shape[1]))
-            elif self.config['reward_conditioned']:
-                rtg.append(discount_cumsum(traj['rewards'][si:], normalize = self.normalization_const, trim = s[-1].shape[1]).reshape(1, -1, 2))
-
+            if self.config['reward_conditioned'] or True: 
+                rtg.append(discount_cumsum(traj['rewards'][si:], normalize = self.normalization_const, trim = s[-1].shape[1]).reshape(1, -1, 1))
             # padding and state + reward normalization
             tlen = s[-1].shape[1]
             if self.augment:
@@ -247,43 +250,40 @@ class D4RLIterableDataset(data.IterableDataset):
             if self.config['goal_conditioned']:
                 # g[-1] = (g[-1] - state_mean[:goal_dim]) / state_std[:goal_dim]
                 g[-1] = np.concatenate([np.zeros((1, K - tlen, goal_dim)), g[-1]], axis=1)
-            elif self.config['reward_conditioned']:
-                rtg[-1] = np.concatenate([np.zeros((1, K - tlen, 2)), rtg[-1]], axis=1) #/ scale
+            if self.config['reward_conditioned'] or True:
+                rtg[-1] = np.concatenate([np.zeros((1, K - tlen, 1)), rtg[-1]], axis=1) #/ scale
             mask.append(np.concatenate([np.zeros((1, K - tlen)), np.ones((1, tlen))], axis=1))
-
         s = torch.from_numpy(np.concatenate(s, axis=0)).to(dtype=torch.float32)
         a = torch.from_numpy(np.concatenate(a, axis=0)).to(dtype=torch.float32)
 
         if self.config['goal_conditioned']:
             g = torch.from_numpy(np.concatenate(g, axis=0)).to(dtype=torch.float32)
-        elif self.config['reward_conditioned']:
+        if self.config['reward_conditioned'] or True:
             rtg = torch.from_numpy(np.concatenate(rtg, axis=0)).to(dtype=torch.float32, )
-            artg = rtg[:, 0:1]
-            artg = artg.repeat(1, s.shape[1], 1)
- 
-        mask = torch.from_numpy(np.concatenate(mask, axis=0))
-
+            # artg = rtg[:, 0:1]
+            # artg = artg.repeat(1, s.shape[1], 1)
+        mask = torch.from_numpy(np.concatenate(mask, axis=0)).to(dtype=torch.float32)
         if self.config['goal_conditioned']:
-            return s, a, g, mask
-        elif self.config['reward_conditioned'] and self.config.get('train_goal_net'):
-            return s, rtg, artg, mask
+            return s, a, g, mask, rtg
+        elif self.config['reward_conditioned']:
+            return s, rtg, artg, mask, None
         else:
-            return s, a, artg, mask
+            return s, a, artg, mask, None
 
     def _sample_batch(self, batch_size = None) -> Tuple:
         trajectory_indices, start_indices, goal_indices = self._sample_indices()
-        s, a, cond, mask = self._fetch_trajectories(trajectory_indices,
+        s, a, cond, mask, rtg = self._fetch_trajectories(trajectory_indices,
                                                                      start_indices,
                                                                      goal_indices)
-        return s, a, cond, mask
+        return s, a, cond, mask, rtg
 
     def __iter__(self) -> Iterator[Tuple[torch.tensor, torch.tensor]]:
         """Yield each training example."""
         examples_yielded = 0
         while examples_yielded < self.epoch_size:
-            s, a, cond, mask = self._sample_batch()
+            s, a, cond, mask, rtg = self._sample_batch()
             for i in range(self.index_batch_size):
-                yield torch.cat([s[i], cond[i]], dim = -1), a[i], mask[i]
+                yield torch.cat([s[i], cond[i]], dim = -1), a[i], mask[i], rtg[i]
                 examples_yielded += 1
                 if examples_yielded >= self.epoch_size:
                     break
@@ -293,7 +293,7 @@ class D4RLIterableDataset(data.IterableDataset):
         return self.epoch_size
 
 def discount_cumsum(x, normalize = 1, trim = 1e8):
-    csum = np.cumsum(x[::-1])[::-1][:trim]
+    csum = np.cumsum(x[::-1])[::-1][:trim] 
     avg, norm = csum / (x.shape[0] - np.arange(min(x.shape[0], trim))), csum / normalize
     if os.environ.get('AVG_REWARD'):
         return avg
@@ -352,6 +352,7 @@ class AbstractDataModule(pl.LightningDataModule, ABC):
             num_workers=self.num_workers,
             generator=self.generator,
             worker_init_fn=seed_worker,
+            persistent_workers=True,
         )
 
     def val_dataloader(self) -> data.DataLoader:
@@ -362,6 +363,7 @@ class AbstractDataModule(pl.LightningDataModule, ABC):
             num_workers=self.num_workers,
             generator=self.generator,
             worker_init_fn=seed_worker,
+            persistent_workers=True,
         )
 
 
@@ -582,7 +584,8 @@ class D4RLRvSGDataModule(AbstractDataModule):
         num_workers: Optional[int] = None,
         seed: Optional[int] = None,
         K = 20,
-        train_goal_net = False
+        train_goal_net = False,
+        weight_loss_by_rtg = False,
     ):
         """Custom initialization.
 
@@ -595,6 +598,7 @@ class D4RLRvSGDataModule(AbstractDataModule):
             num_workers=num_workers,
             seed=seed,
         )
+        self.weight_loss_by_rtg = weight_loss_by_rtg
         self.env = env
         self.goal_columns = (0, 1) if step.is_antmaze_env(env) else None
         self.K = K
@@ -612,7 +616,8 @@ class D4RLRvSGDataModule(AbstractDataModule):
             K=self.K,
             max_ep_len=1000,
             goal_conditioned=True,
-            reward_conditioned=False
+            reward_conditioned=False,
+            weight_loss_by_rtg=self.weight_loss_by_rtg,
         )
         val_dataset = (
             D4RLIterableDataset(
@@ -621,7 +626,7 @@ class D4RLRvSGDataModule(AbstractDataModule):
                 K=self.K,
                 max_ep_len=1000,
                 goal_conditioned=True,
-                reward_conditioned=False
+                reward_conditioned=False,
             )
             if self.val_frac > 0
             else None

@@ -276,7 +276,7 @@ class TransformerExtractor(MlpExtractor):
         if goal_network_ckpt is not None:
             # TODO make this prettier
             if 'antmaze' in goal_network_ckpt:
-                self.cfg = dict(obs_dim = 29, goal_dim = 2, hidden_dim = 1024, max_T = None)
+                self.cfg = dict(obs_dim = 29, goal_dim = 2, hidden_dim = 1024, max_T = 30)
             elif 'kitchen' in goal_network_ckpt:
                 self.cfg = dict(obs_dim = 60, goal_dim = 60, hidden_dim = 1024, max_T = 30,)
             elif 'hopper' in goal_network_ckpt:
@@ -289,7 +289,17 @@ class TransformerExtractor(MlpExtractor):
                 assert 'manual' in goal_network_ckpt
                 self.cfg = dict(obs_dim = 29, goal_dim = 2)
                 self.goal_network = goal_net.ManualGoalNetwork(**self.cfg)
-
+        self.waypoint_weights = nn.Sequential(
+            nn.Linear(
+                self.cfg['obs_dim'] + self.cfg['goal_dim'] + self.cfg['max_T'] * self.cfg['goal_dim'], 
+                self.cfg['max_T'] * self.cfg['goal_dim']
+            ), 
+            nn.Unflatten(
+                dim=2,
+                unflattened_size=(self.cfg['goal_dim'], self.cfg['max_T'])
+            ),
+            nn.Softmax(dim=3)
+        )
         # if config is not specified, reverts to MLP only
         if config is not None:
             model_actions = bool(os.environ.get('MODEL_ACTIONS', False))
@@ -327,7 +337,7 @@ class TransformerExtractor(MlpExtractor):
         if self.goal_network is None and self.goal_network_ckpt is not None:
             self.goal_network = goal_net.KForwardGoalNetwork.load_from_checkpoint(
                 self.goal_network_ckpt, **self.cfg
-            ).to(features[0].device)
+            )
             self.goal_network.eval()
             for p in self.goal_network.parameters():
                 p.requires_grad = False
@@ -340,4 +350,7 @@ class TransformerExtractor(MlpExtractor):
             if os.environ.get('TRACK_GOALS'):
                 global GOAL_NET_OUT
                 GOAL_NET_OUT.extend(new_goals[:, -1].numpy().reshape((-1, 2)).tolist())
-        return torch.cat([obs, new_goals], dim = -1), actions
+        wp_weights = self.waypoint_weights(torch.cat([obs, new_goals], dim = -1))
+        wp_weights = wp_weights.transpose(-2, -1).reshape((*(wp_weights.shape[:-2]), self.cfg['max_T'] * self.cfg['goal_dim']))
+        weighted_goals = torch.mul(wp_weights, new_goals).reshape((*(wp_weights.shape[:2]), self.cfg['max_T'], self.cfg['goal_dim'])).sum(dim=2).squeeze(dim=2)
+        return torch.cat([obs, weighted_goals], dim = -1), actions

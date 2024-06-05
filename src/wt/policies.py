@@ -151,7 +151,7 @@ class RvS(pl.LightningModule):
         log_prefix: str = "train",
     ) -> torch.Tensor:
         """Computes loss for a training batch."""
-        obs_goal, action, mask = batch
+        obs_goal, action, mask, weight = batch
         action = action.view(action.shape[0] * action.shape[1], -1)
         _, log_probs, _, prediction = self.model.evaluate_and_predict(
             obs_goal,
@@ -159,7 +159,7 @@ class RvS(pl.LightningModule):
         )
         # dynamics_preds = self.model.predict_dynamics(cached = True)
 
-        log_probs = log_probs[mask.view(-1).bool()]
+        log_probs = log_probs[mask.view(-1).ne(0)]
 
         prob_true_act = torch.exp(log_probs).mean()
         loss = -log_probs.mean()
@@ -247,8 +247,8 @@ class RvS(pl.LightningModule):
                 s_tensor = torch.tensor(observations)
                 actions = self.model._predict(s_tensor, deterministic=deterministic)
             else:
-                s_g_tensor = dataset.make_s_g_tensor(observations, goals).float()
-                actions = self.model._predict([s_g_tensor, torch.tensor(actions).float() if actions is not None else actions], deterministic=deterministic)
+                s_g_tensor = dataset.make_s_g_tensor(observations, goals).float().to(self.model.device)
+                actions = self.model._predict([s_g_tensor, torch.tensor(actions).float().to(self.model.device) if actions is not None else actions], deterministic=deterministic)
 
         return actions.cpu().numpy()
 

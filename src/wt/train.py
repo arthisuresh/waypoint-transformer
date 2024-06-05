@@ -70,7 +70,8 @@ def run_training(
     batch_size: int,
     val_frac: float,
     use_gpu: bool,
-    train_goal_net: bool = False
+    train_goal_net: bool = False,
+    weight_loss_by_rtg: bool = False
 ) -> None:
     """Run the training with PyTorch Lightning and log to Weights & Biases."""
     reward_conditioning = True if 'antmaze' not in env_name and 'kitchen' not in env_name else False
@@ -95,7 +96,8 @@ def run_training(
                     learning_rate=learning_rate,
                     batch_size=batch_size,
                     max_T = 30,
-                    reward = reward_conditioning
+                    reward = reward_conditioning,
+                    weight_loss_by_rtg = weight_loss_by_rtg
                 )
     wandb_logger.watch(model, log="all")
 
@@ -120,16 +122,20 @@ def run_training(
         save_last=True,  # save latest model
         save_top_k=1,  # save top model based on monitored loss
     )
+    progress_bar_callback = pl.callbacks.TQDMProgressBar(refresh_rate=20)
     trainer = pl.Trainer(
-        gpus=int(use_gpu),
-        auto_lr_find=auto_tune_lr,
+        accelerator="gpu",
+        devices=1,
+        # gpus=int(use_gpu),
+        # auto_lr_find=auto_tune_lr,
         max_epochs=epochs,
         max_steps=max_steps,
         max_time=train_time,
         logger=wandb_logger,
-        progress_bar_refresh_rate=20,
-        callbacks=[periodic_checkpoint_callback, val_checkpoint_callback],
-        track_grad_norm=-1,  # logs the 2-norm of gradients
+        # progress_bar_refresh_rate=20,
+        # callbacks=[periodic_checkpoint_callback, val_checkpoint_callback],
+        # track_grad_norm=-1,  # logs the 2-norm of gradients
+        callbacks=[periodic_checkpoint_callback, val_checkpoint_callback, progress_bar_callback],
         limit_val_batches=1.0 if val_frac > 0 else 0,
         limit_test_batches=0,
     )
@@ -145,7 +151,8 @@ def run_training(
         average_reward_to_go=not cumulative_reward_to_go,
         seed=seed,
         train_goal_net = train_goal_net,
-        K = 40 if train_goal_net else 20
+        K = 40 if train_goal_net else 20,
+        weight_loss_by_rtg=weight_loss_by_rtg
     )
     """
     else:
@@ -376,6 +383,12 @@ if __name__ == "__main__":
         help="pass --train_goal_net to train goal network",
     )
     parser.add_argument(
+        "--weight_loss_by_rtg",
+        action="store_true",
+        default=False,
+        help="pass --weight_loss_by_rtg to weight loss in goal network by RTG",
+    )
+    parser.add_argument(
         "--d4rl_analysis",
         default="all",
         type=str,
@@ -453,7 +466,8 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         val_frac=args.val_frac,
         use_gpu=args.use_gpu,
-        train_goal_net=args.train_goal_net
+        train_goal_net=args.train_goal_net,
+        weight_loss_by_rtg=args.weight_loss_by_rtg,
     )
     if args.visualize:
         visualize.visualize_performance(

@@ -16,7 +16,7 @@ from wt import dataset, layers, step, util
 
 class KForwardGoalNetwork(pl.LightningModule):
     def __init__(self, obs_dim, goal_dim, hidden_dim, max_T, recurrent = False,
-                learning_rate=1e-3, batch_size=1024, reward = False):
+                learning_rate=1e-3, batch_size=1024, reward = False, weight_loss_by_rtg=False):
         super().__init__()
         self.recurrent = recurrent 
         self.learning_rate = learning_rate
@@ -25,10 +25,23 @@ class KForwardGoalNetwork(pl.LightningModule):
         self.goal_dim = goal_dim
         self.max_T = max_T
         self.reward = reward
+        self.weight_loss_by_rtg = weight_loss_by_rtg
+        self.predict_multiple_waypoints = True
 
         if self.reward:
             assert goal_dim == 2
-        self.net = nn.Sequential(nn.Linear(obs_dim + goal_dim, hidden_dim),
+        if self.predict_multiple_waypoints:
+            self.net = nn.Sequential(nn.Linear(obs_dim + goal_dim, hidden_dim),
+                                 nn.ReLU(),
+                                 nn.Linear(hidden_dim, hidden_dim),
+                                 nn.ReLU(),
+                                 nn.Linear(hidden_dim, hidden_dim),
+                                 nn.ReLU(),
+                                 nn.Linear(hidden_dim, hidden_dim),
+                                 nn.ReLU(),
+                                 nn.Linear(hidden_dim, goal_dim * self.max_T))
+        else:
+            self.net = nn.Sequential(nn.Linear(obs_dim + goal_dim, hidden_dim),
                                  nn.ReLU(),
                                  nn.Linear(hidden_dim, hidden_dim),
                                  nn.ReLU(),
@@ -41,7 +54,8 @@ class KForwardGoalNetwork(pl.LightningModule):
     def forward(self, obs_goal):
         if self.reward:
             return obs_goal[..., -self.goal_dim:] + self.net(obs_goal)
-
+        if self.predict_multiple_waypoints:
+            return torch.cat([obs_goal[..., :self.goal_dim]] * self.max_T, dim=-1) + self.net(obs_goal)
         return obs_goal[..., :self.goal_dim] + self.net(obs_goal)
 
     def training_step(
@@ -51,16 +65,22 @@ class KForwardGoalNetwork(pl.LightningModule):
         log_prefix: str = "train",
     ) -> torch.Tensor:
         """Computes loss for a training batch."""
-        obs_goal, var, mask = batch
+        obs_goal, var, mask, weights = batch
         if self.reward:
             # average reward case 
             loss = F.mse_loss(self(obs_goal), var)
             # cumulative reward case
         else:
             loss = 0
+            # obs_goal.shape [B, K, goal]
             for i in range(obs_goal.shape[1] - self.max_T):
-                loss = loss + F.mse_loss(self(obs_goal[:, i]), obs_goal[:, i + self.max_T, :self.goal_dim])
-
+                if self.predict_multiple_waypoints:
+                    loss += F.mse_loss(self(obs_goal[:, i]), torch.flatten(obs_goal[:, (i+1):(i + self.max_T+1), :self.goal_dim], start_dim=1))
+                else:
+                    addl_loss = F.mse_loss(self(obs_goal[:, i]), obs_goal[:, i + self.max_T, :self.goal_dim], reduction='none')
+                    addl_loss = torch.mul(addl_loss, torch.exp(5.0 * weights[:, i])).sum()
+                    den = (torch.exp(5.0 * weights[:, i])).sum()
+                    loss += (addl_loss/den)
             loss = loss / (obs_goal.shape[1] - self.max_T)
 
         self.log(f"{log_prefix}_loss", loss, prog_bar=True)
@@ -198,4 +218,3 @@ class ManualGoalNetwork(nn.Module):
         global_prox_cond = torch.linalg.norm(self.goals[sorted_idx] - global_goals.unsqueeze(-2), dim = -1) < torch.linalg.norm(loc - global_goals, dim = -1).unsqueeze(-1)
         selected = global_prox_cond.int().argmax(dim = -1)
         return self.goals[selected]
-
