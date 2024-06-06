@@ -291,14 +291,10 @@ class TransformerExtractor(MlpExtractor):
                 self.goal_network = goal_net.ManualGoalNetwork(**self.cfg)
         self.waypoint_weights = nn.Sequential(
             nn.Linear(
-                self.cfg['obs_dim'] + self.cfg['goal_dim'] + self.cfg['max_T'] * self.cfg['goal_dim'], 
-                self.cfg['max_T'] * self.cfg['goal_dim']
+                self.cfg['obs_dim'] + self.cfg['goal_dim'], 
+                self.cfg['max_T']
             ), 
-            nn.Unflatten(
-                dim=2,
-                unflattened_size=(self.cfg['goal_dim'], self.cfg['max_T'])
-            ),
-            nn.Softmax(dim=3)
+            nn.Softmax(dim=2)
         )
         # if config is not specified, reverts to MLP only
         if config is not None:
@@ -350,7 +346,7 @@ class TransformerExtractor(MlpExtractor):
             if os.environ.get('TRACK_GOALS'):
                 global GOAL_NET_OUT
                 GOAL_NET_OUT.extend(new_goals[:, -1].numpy().reshape((-1, 2)).tolist())
-        wp_weights = self.waypoint_weights(torch.cat([obs, new_goals], dim = -1))
-        wp_weights = wp_weights.transpose(-2, -1).reshape((*(wp_weights.shape[:-2]), self.cfg['max_T'] * self.cfg['goal_dim']))
+        wp_weights = self.waypoint_weights(obs)
+        wp_weights = torch.stack(tensors=[wp_weights, wp_weights],  dim=-1).reshape(*(new_goals.shape[:-1]), self.cfg['max_T'] * self.cfg['goal_dim'])
         weighted_goals = torch.mul(wp_weights, new_goals).reshape((*(wp_weights.shape[:2]), self.cfg['max_T'], self.cfg['goal_dim'])).sum(dim=2).squeeze(dim=2)
         return torch.cat([obs, weighted_goals], dim = -1), actions
