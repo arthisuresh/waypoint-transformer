@@ -19,7 +19,7 @@ GPT model:
 
 import math
 import logging
-from typing import Dict, List, Tuple, Type, Union
+from typing import Dict, List, Optional, Tuple, Type, Union
 
 from stable_baselines3.common.torch_layers import MlpExtractor
 
@@ -41,6 +41,14 @@ DEPRECATED = True
 class GELU(nn.Module):
     def forward(self, input):
         return F.gelu(input)
+    
+class Temperature(nn.Module):
+    def __init__(self, tau: int = 1) -> None:
+        super().__init__()
+        self.tau = tau
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return input / self.tau
 
 class GPTConfig:
     """ base GPT config, params common to all GPT versions """
@@ -293,8 +301,9 @@ class TransformerExtractor(MlpExtractor):
             nn.Linear(
                 self.cfg['obs_dim'] + self.cfg['goal_dim'], 
                 self.cfg['max_T']
-            ), 
-            nn.Softmax(dim=2)
+            ),
+            Temperature(tau=4),
+            nn.Softmax(dim=2),
         )
         # if config is not specified, reverts to MLP only
         if config is not None:
