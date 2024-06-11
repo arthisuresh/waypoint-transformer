@@ -300,7 +300,7 @@ class TransformerExtractor(MlpExtractor):
         self.waypoint_weights = nn.Sequential(
             nn.Linear(
                 self.cfg['obs_dim'] + self.cfg['goal_dim'], 
-                self.cfg['max_T']
+                self.cfg['max_T'] // 5
             ),
             Temperature(tau=4),
             nn.Softmax(dim=2),
@@ -356,6 +356,6 @@ class TransformerExtractor(MlpExtractor):
                 global GOAL_NET_OUT
                 GOAL_NET_OUT.extend(new_goals[:, -1].numpy().reshape((-1, 2)).tolist())
         wp_weights = self.waypoint_weights(obs)
-        wp_weights = torch.stack(tensors=[wp_weights, wp_weights],  dim=-1).reshape(*(new_goals.shape[:-1]), self.cfg['max_T'] * self.cfg['goal_dim'])
-        weighted_goals = torch.mul(wp_weights, new_goals).reshape((*(wp_weights.shape[:2]), self.cfg['max_T'], self.cfg['goal_dim'])).sum(dim=2).squeeze(dim=2)
+        wp_weights = torch.stack(tensors=[wp_weights, wp_weights],  dim=-1).reshape(*(new_goals.shape[:-1]), (self.cfg['max_T'] // 5) * self.cfg['goal_dim'])
+        weighted_goals = torch.mul(wp_weights, new_goals).reshape((*(wp_weights.shape[:2]), (self.cfg['max_T'] // 5), self.cfg['goal_dim'])).sum(dim=2).squeeze(dim=2)
         return torch.cat([obs, weighted_goals], dim = -1), actions

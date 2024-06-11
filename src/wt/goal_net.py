@@ -16,7 +16,7 @@ from wt import dataset, layers, step, util
 
 class KForwardGoalNetwork(pl.LightningModule):
     def __init__(self, obs_dim, goal_dim, hidden_dim, max_T, recurrent = False,
-                learning_rate=1e-3, batch_size=1024, reward = False, weight_loss_by_rtg=False):
+                learning_rate=1e-3, batch_size=1024, reward = False, weight_loss_by_rtg=True):
         super().__init__()
         self.recurrent = recurrent 
         self.learning_rate = learning_rate
@@ -27,6 +27,7 @@ class KForwardGoalNetwork(pl.LightningModule):
         self.reward = reward
         self.weight_loss_by_rtg = weight_loss_by_rtg
         self.predict_multiple_waypoints = True
+        self.waypoint_intvl = 5
 
         if self.reward:
             assert goal_dim == 2
@@ -39,7 +40,7 @@ class KForwardGoalNetwork(pl.LightningModule):
                                  nn.ReLU(),
                                  nn.Linear(hidden_dim, hidden_dim),
                                  nn.ReLU(),
-                                 nn.Linear(hidden_dim, goal_dim * self.max_T))
+                                 nn.Linear(hidden_dim, goal_dim * int(self.max_T / self.waypoint_intvl) ))
         else:
             self.net = nn.Sequential(nn.Linear(obs_dim + goal_dim, hidden_dim),
                                  nn.ReLU(),
@@ -55,7 +56,7 @@ class KForwardGoalNetwork(pl.LightningModule):
         if self.reward:
             return obs_goal[..., -self.goal_dim:] + self.net(obs_goal)
         if self.predict_multiple_waypoints:
-            return torch.cat([obs_goal[..., :self.goal_dim]] * self.max_T, dim=-1) + self.net(obs_goal)
+            return torch.cat([obs_goal[..., :self.goal_dim]] * int(self.max_T / self.waypoint_intvl), dim=-1) + self.net(obs_goal)
         return obs_goal[..., :self.goal_dim] + self.net(obs_goal)
 
     def training_step(
@@ -75,12 +76,13 @@ class KForwardGoalNetwork(pl.LightningModule):
             # obs_goal.shape [B, K, goal]
             for i in range(obs_goal.shape[1] - self.max_T):
                 if self.predict_multiple_waypoints:
-                    loss += F.mse_loss(self(obs_goal[:, i]), torch.flatten(obs_goal[:, (i+1):(i + self.max_T+1), :self.goal_dim], start_dim=1))
+                    loss += F.mse_loss(self(obs_goal[:, i]), torch.flatten(obs_goal[:, list(range(i+self.waypoint_intvl,(i + self.max_T+1), self.waypoint_intvl)), :self.goal_dim], start_dim=1))
                 else:
-                    addl_loss = F.mse_loss(self(obs_goal[:, i]), obs_goal[:, i + self.max_T, :self.goal_dim], reduction='none')
-                    addl_loss = torch.mul(addl_loss, torch.exp(5.0 * weights[:, i])).sum()
-                    den = (torch.exp(5.0 * weights[:, i])).sum()
-                    loss += (addl_loss/den)
+                    loss += F.mse_loss(self(obs_goal[:, i]), obs_goal[:, i + self.max_T, :self.goal_dim])
+                    # addl_loss = F.mse_loss(self(obs_goal[:, i]), obs_goal[:, i + self.max_T, :self.goal_dim], reduction='none')
+                    # addl_loss = torch.mul(addl_loss, 0.5 + 10.0 * weights[:, i]).sum()
+                    # den = (0.5 + 10.0 * weights[:, i]).sum()
+                    # loss += (addl_loss/den)
             loss = loss / (obs_goal.shape[1] - self.max_T)
 
         self.log(f"{log_prefix}_loss", loss, prog_bar=True)
